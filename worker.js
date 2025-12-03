@@ -8,28 +8,38 @@ async function sendTGMessage(message, env) {
   }
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  const data = {
-    chat_id: chatId,
-    text: message,
-    parse_mode: 'Markdown',
-  };
-
-  try {
+  const sendJson = async (payload) => {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`HTTP ${response.status}: ${errorText}`);
+      const details = errorText ? ` - ${errorText.slice(0, 200)}` : '';
+      throw new Error(`HTTP ${response.status}${details}`);
     }
-    
-    console.info("✅ Telegram 消息发送成功");
-    return await response.json();
+
+    return response;
+  };
+
+  try {
+    try {
+      await sendJson({ chat_id: chatId, text: message, parse_mode: 'Markdown' });
+      console.info("✅ Telegram 消息发送成功");
+    } catch (error) {
+      if (error.message.startsWith('HTTP 400')) {
+        console.warn(`⚠️ Telegram 返回 400，改用纯文本重试: ${error.message}`);
+        await sendJson({ chat_id: chatId, text: message });
+        console.info("✅ Telegram 消息发送成功（纯文本重试）");
+      } else {
+        throw error;
+      }
+    }
+    return true;
   } catch (e) {
     console.error(`❌ 发送 Telegram 消息失败: ${e.message}`);
     return null;
@@ -41,14 +51,41 @@ async function loginKoyeb(email, password) {
     return [false, "邮箱或密码为空"];
   }
 
+  const loginPageUrl = 'https://app.koyeb.com/auth/login';
   const loginUrl = 'https://app.koyeb.com/v1/account/login';
   const headers = {
+    'Accept': 'application/json, text/plain, */*',
     'Content-Type': 'application/json',
+    'Origin': 'https://app.koyeb.com',
+    'Referer': 'https://app.koyeb.com/auth/login',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
   };
   const data = { email: email.trim(), password };
 
+  let signinFallback = null;
+
   try {
+    try {
+      const preload = await fetch(loginPageUrl, { method: 'GET', headers, redirect: 'follow' });
+      if (preload.ok) {
+        const url = new URL(preload.url);
+        if (url.hostname.includes('signin.koyeb.com')) {
+          const params = url.searchParams;
+          signinFallback = {
+            base: `${url.protocol}//${url.hostname}`,
+            referer: preload.url,
+            client_id: params.get('client_id'),
+            redirect_uri: params.get('redirect_uri'),
+            state: params.get('state'),
+            authorization_session_id: params.get('authorization_session_id'),
+          };
+        }
+      }
+    } catch (preErr) {
+      console.warn(`⚠️ 预检登录页失败，继续尝试登录: ${preErr.message}`);
+    }
+
+    const postHeaders = headers;
     const controller = new AbortController();
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(() => {
@@ -59,7 +96,7 @@ async function loginKoyeb(email, password) {
 
     const fetchPromise = fetch(loginUrl, {
       method: 'POST',
-      headers,
+      headers: postHeaders,
       body: JSON.stringify(data),
       signal: controller.signal,
     });
@@ -72,6 +109,50 @@ async function loginKoyeb(email, password) {
       if (contentType && contentType.includes('application/json')) {
         const errorData = await response.json();
         errorMsg += ` - ${errorData.message || JSON.stringify(errorData)}`;
+      } else {
+        const text = (await response.text()).trim();
+        if (text) {
+          errorMsg += ` - ${text.slice(0, 200)}`;
+        }
+      }
+      if (response.status === 403 && signinFallback) {
+        console.info(`ℹ️ 旧接口返回 403，尝试 WorkOS 登录: ${errorMsg}`);
+
+        const workosUrl = `${signinFallback.base}/signin/password`;
+        const payload = {
+          email: data.email,
+          password,
+          client_id: signinFallback.client_id,
+          redirect_uri: signinFallback.redirect_uri,
+          state: signinFallback.state,
+          authorization_session_id: signinFallback.authorization_session_id,
+        };
+
+        const workosResp = await fetch(workosUrl, {
+          method: 'POST',
+          headers: { ...headers, Referer: signinFallback.referer },
+          body: JSON.stringify(payload),
+          redirect: 'follow',
+        });
+
+        if (workosResp.redirected && workosResp.url) {
+          try {
+            await fetch(workosResp.url, { headers });
+          } catch (cbErr) {
+            console.warn(`⚠️ 回调请求失败: ${cbErr.message}`);
+          }
+        }
+
+        if (workosResp.ok || [302, 303].includes(workosResp.status)) {
+          return [true, 'WorkOS 登录成功'];
+        }
+
+        const fallbackBody = await workosResp.text();
+        return [false, `WorkOS 登录失败: HTTP ${workosResp.status} ${fallbackBody.slice(0, 200)}`];
+      }
+
+      if (response.status === 403) {
+        errorMsg += '（可能需要验证码或 Cookie）';
       }
       return [false, errorMsg];
     }
