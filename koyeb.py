@@ -43,14 +43,33 @@ def login_koyeb(email, password):
         return False, "邮箱或密码为空"
 
     login_url = "https://app.koyeb.com/v1/account/login"
+    login_page_url = "https://app.koyeb.com/auth/login"
     headers = {
+        "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "Origin": "https://app.koyeb.com",
+        "Referer": "https://app.koyeb.com/auth/login",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     }
     data = {"email": email.strip(), "password": password}
 
+    session = requests.Session()
+    session.headers.update(headers)
+
     try:
-        response = requests.post(login_url, headers=headers, json=data, timeout=30)
+        # 先请求登录页以获取必要的 Cookie，减少 403 风险
+        preload = session.get(login_page_url, timeout=30)
+        preload.raise_for_status()
+    except requests.RequestException as e:
+        logging.warning(f"⚠️ 预检登录页失败，继续尝试登录: {e}")
+
+    try:
+        response = session.post(login_url, json=data, timeout=30)
+        if response.status_code == 403:
+            detail = response.text.strip()
+            detail = detail[:200] + "..." if len(detail) > 200 else detail
+            return False, f"403 Forbidden（可能需要验证码或 Cookie）: {detail}"
+
         response.raise_for_status()
         return True, "成功"
     except requests.Timeout:

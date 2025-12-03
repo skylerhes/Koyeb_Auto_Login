@@ -41,14 +41,32 @@ async function loginKoyeb(email, password) {
     return [false, "邮箱或密码为空"];
   }
 
+  const loginPageUrl = 'https://app.koyeb.com/auth/login';
   const loginUrl = 'https://app.koyeb.com/v1/account/login';
   const headers = {
+    'Accept': 'application/json, text/plain, */*',
     'Content-Type': 'application/json',
+    'Origin': 'https://app.koyeb.com',
+    'Referer': 'https://app.koyeb.com/auth/login',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
   };
   const data = { email: email.trim(), password };
 
   try {
+    let preflightCookie = '';
+    try {
+      const preload = await fetch(loginPageUrl, { method: 'GET', headers });
+      if (preload.ok) {
+        const setCookie = preload.headers.get('set-cookie');
+        if (setCookie) {
+          preflightCookie = setCookie.split(';')[0];
+        }
+      }
+    } catch (preErr) {
+      console.warn(`⚠️ 预检登录页失败，继续尝试登录: ${preErr.message}`);
+    }
+
+    const postHeaders = preflightCookie ? { ...headers, Cookie: preflightCookie } : headers;
     const controller = new AbortController();
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(() => {
@@ -59,7 +77,7 @@ async function loginKoyeb(email, password) {
 
     const fetchPromise = fetch(loginUrl, {
       method: 'POST',
-      headers,
+      headers: postHeaders,
       body: JSON.stringify(data),
       signal: controller.signal,
     });
@@ -72,6 +90,14 @@ async function loginKoyeb(email, password) {
       if (contentType && contentType.includes('application/json')) {
         const errorData = await response.json();
         errorMsg += ` - ${errorData.message || JSON.stringify(errorData)}`;
+      } else {
+        const text = (await response.text()).trim();
+        if (text) {
+          errorMsg += ` - ${text.slice(0, 200)}`;
+        }
+      }
+      if (response.status === 403) {
+        errorMsg += '（可能需要验证码或 Cookie）';
       }
       return [false, errorMsg];
     }
