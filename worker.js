@@ -64,23 +64,32 @@ async function loginKoyeb(email, password) {
 
   let signinFallback = null;
 
+  const fetchSigninFallback = async (loginHint) => {
+    const url = loginHint ? `${loginPageUrl}?login_hint=${encodeURIComponent(loginHint)}` : loginPageUrl;
+    const preload = await fetch(url, { method: 'GET', headers, redirect: 'follow' });
+    if (!preload.ok) {
+      return null;
+    }
+
+    const finalUrl = new URL(preload.url);
+    if (!finalUrl.hostname.includes('signin.koyeb.com')) {
+      return null;
+    }
+
+    const params = finalUrl.searchParams;
+    return {
+      base: `${finalUrl.protocol}//${finalUrl.hostname}`,
+      referer: preload.url,
+      client_id: params.get('client_id'),
+      redirect_uri: params.get('redirect_uri'),
+      state: params.get('state'),
+      authorization_session_id: params.get('authorization_session_id'),
+    };
+  };
+
   try {
     try {
-      const preload = await fetch(loginPageUrl, { method: 'GET', headers, redirect: 'follow' });
-      if (preload.ok) {
-        const url = new URL(preload.url);
-        if (url.hostname.includes('signin.koyeb.com')) {
-          const params = url.searchParams;
-          signinFallback = {
-            base: `${url.protocol}//${url.hostname}`,
-            referer: preload.url,
-            client_id: params.get('client_id'),
-            redirect_uri: params.get('redirect_uri'),
-            state: params.get('state'),
-            authorization_session_id: params.get('authorization_session_id'),
-          };
-        }
-      }
+      signinFallback = await fetchSigninFallback();
     } catch (preErr) {
       console.warn(`⚠️ 预检登录页失败，继续尝试登录: ${preErr.message}`);
     }
@@ -149,6 +158,48 @@ async function loginKoyeb(email, password) {
 
         const fallbackBody = await workosResp.text();
         return [false, `WorkOS 登录失败: HTTP ${workosResp.status} ${fallbackBody.slice(0, 200)}`];
+      }
+
+      if (response.status === 403 && !signinFallback) {
+        try {
+          signinFallback = await fetchSigninFallback(data.email);
+          if (signinFallback) {
+            console.info('ℹ️ 旧接口 403 后获取到 WorkOS 参数，重试 WorkOS 登录');
+            const workosUrl = `${signinFallback.base}/signin/password`;
+            const payload = {
+              email: data.email,
+              password,
+              client_id: signinFallback.client_id,
+              redirect_uri: signinFallback.redirect_uri,
+              state: signinFallback.state,
+              authorization_session_id: signinFallback.authorization_session_id,
+            };
+
+            const workosResp = await fetch(workosUrl, {
+              method: 'POST',
+              headers: { ...headers, Referer: signinFallback.referer },
+              body: JSON.stringify(payload),
+              redirect: 'follow',
+            });
+
+            if (workosResp.redirected && workosResp.url) {
+              try {
+                await fetch(workosResp.url, { headers });
+              } catch (cbErr) {
+                console.warn(`⚠️ 回调请求失败: ${cbErr.message}`);
+              }
+            }
+
+            if (workosResp.ok || [302, 303].includes(workosResp.status)) {
+              return [true, 'WorkOS 登录成功'];
+            }
+
+            const fallbackBody = await workosResp.text();
+            return [false, `WorkOS 登录失败: HTTP ${workosResp.status} ${fallbackBody.slice(0, 200)}`];
+          }
+        } catch (fbErr) {
+          console.warn(`⚠️ 获取 WorkOS 登录参数失败: ${fbErr.message}`);
+        }
       }
 
       if (response.status === 403) {

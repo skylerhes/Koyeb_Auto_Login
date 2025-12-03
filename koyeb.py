@@ -71,65 +71,79 @@ def login_koyeb(email, password):
 
     signin_fallback = None
 
-    try:
-        # 先请求登录页以获取必要的 Cookie，减少 403 风险，并捕获跳转的 WorkOS 登录信息
-        preload = session.get(login_page_url, timeout=30, allow_redirects=True)
+    def fetch_signin_fallback(login_hint=None):
+        url = login_page_url
+        if login_hint:
+            url = f"{login_page_url}?login_hint={login_hint}"
+        preload = session.get(url, timeout=30, allow_redirects=True)
         preload.raise_for_status()
 
         final_url = preload.url
         parsed = urlparse(final_url)
-        if "signin.koyeb.com" in parsed.netloc:
-            qs = parse_qs(parsed.query)
-            signin_fallback = {
-                "base": f"{parsed.scheme}://{parsed.netloc}",
-                "referer": final_url,
-                "client_id": qs.get("client_id", [None])[0],
-                "redirect_uri": qs.get("redirect_uri", [None])[0],
-                "state": qs.get("state", [None])[0],
-                "authorization_session_id": qs.get("authorization_session_id", [None])[0],
-            }
+        if "signin.koyeb.com" not in parsed.netloc:
+            return None
+
+        qs = parse_qs(parsed.query)
+        return {
+            "base": f"{parsed.scheme}://{parsed.netloc}",
+            "referer": final_url,
+            "client_id": qs.get("client_id", [None])[0],
+            "redirect_uri": qs.get("redirect_uri", [None])[0],
+            "state": qs.get("state", [None])[0],
+            "authorization_session_id": qs.get("authorization_session_id", [None])[0],
+        }
+
+    try:
+        # 先请求登录页以获取必要的 Cookie，减少 403 风险，并捕获跳转的 WorkOS 登录信息
+        signin_fallback = fetch_signin_fallback()
     except requests.RequestException as e:
         logging.warning(f"⚠️ 预检登录页失败，继续尝试登录: {e}")
 
     try:
         response = session.post(login_url, json=data, timeout=30)
-        if response.status_code == 403 and signin_fallback:
-            detail = response.text.strip()[:200]
-            logging.info(f"ℹ️ 旧接口 403，尝试 WorkOS 登录: {detail}")
-
-            workos_url = f"{signin_fallback['base']}/signin/password"
-            payload = {
-                "email": data["email"],
-                "password": password,
-                "client_id": signin_fallback["client_id"],
-                "redirect_uri": signin_fallback["redirect_uri"],
-                "state": signin_fallback["state"],
-                "authorization_session_id": signin_fallback["authorization_session_id"],
-            }
-
-            workos_headers = {**headers, "Referer": signin_fallback["referer"]}
-
-            workos_resp = session.post(
-                workos_url,
-                json=payload,
-                timeout=30,
-                allow_redirects=True,
-                headers=workos_headers,
-            )
-
-            if workos_resp.is_redirect:
-                callback_url = workos_resp.headers.get("location")
-                if callback_url:
-                    session.get(callback_url, headers=workos_headers, timeout=30)
-
-            if workos_resp.ok or workos_resp.status_code in (302, 303):
-                return True, "WorkOS 登录成功"
-
-            fallback_detail = workos_resp.text.strip()
-            return False, f"WorkOS 登录失败: HTTP {workos_resp.status_code} {fallback_detail[:200]}"
-
         if response.status_code == 403:
-            detail = response.text.strip()
+            if not signin_fallback:
+                try:
+                    signin_fallback = fetch_signin_fallback(login_hint=data["email"])
+                except requests.RequestException as pre_err:
+                    logging.warning(f"⚠️ 获取 WorkOS 登录参数失败: {pre_err}")
+
+            if signin_fallback:
+                detail = response.text.strip()[:200]
+                logging.info(f"ℹ️ 旧接口 403，尝试 WorkOS 登录: {detail}")
+
+                workos_url = f"{signin_fallback['base']}/signin/password"
+                payload = {
+                    "email": data["email"],
+                    "password": password,
+                    "client_id": signin_fallback["client_id"],
+                    "redirect_uri": signin_fallback["redirect_uri"],
+                    "state": signin_fallback["state"],
+                    "authorization_session_id": signin_fallback["authorization_session_id"],
+                }
+
+                workos_headers = {**headers, "Referer": signin_fallback["referer"]}
+
+                workos_resp = session.post(
+                    workos_url,
+                    json=payload,
+                    timeout=30,
+                    allow_redirects=True,
+                    headers=workos_headers,
+                )
+
+                if workos_resp.is_redirect:
+                    callback_url = workos_resp.headers.get("location")
+                    if callback_url:
+                        session.get(callback_url, headers=workos_headers, timeout=30)
+
+                if workos_resp.ok or workos_resp.status_code in (302, 303):
+                    return True, "WorkOS 登录成功"
+
+                fallback_detail = workos_resp.text.strip()
+                return False, f"WorkOS 登录失败: HTTP {workos_resp.status_code} {fallback_detail[:200]}"
+
+            detail = response.text.strip()[:200]
             detail = detail[:200] + "..." if len(detail) > 200 else detail
             return False, f"403 Forbidden（可能需要验证码或 Cookie）: {detail}"
 
