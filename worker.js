@@ -8,28 +8,38 @@ async function sendTGMessage(message, env) {
   }
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  const data = {
-    chat_id: chatId,
-    text: message,
-    parse_mode: 'Markdown',
-  };
-
-  try {
+  const sendJson = async (payload) => {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`HTTP ${response.status}: ${errorText}`);
+      const details = errorText ? ` - ${errorText.slice(0, 200)}` : '';
+      throw new Error(`HTTP ${response.status}${details}`);
     }
-    
-    console.info("✅ Telegram 消息发送成功");
-    return await response.json();
+
+    return response;
+  };
+
+  try {
+    try {
+      await sendJson({ chat_id: chatId, text: message, parse_mode: 'Markdown' });
+      console.info("✅ Telegram 消息发送成功");
+    } catch (error) {
+      if (error.message.startsWith('HTTP 400')) {
+        console.warn(`⚠️ Telegram 返回 400，改用纯文本重试: ${error.message}`);
+        await sendJson({ chat_id: chatId, text: message });
+        console.info("✅ Telegram 消息发送成功（纯文本重试）");
+      } else {
+        throw error;
+      }
+    }
+    return true;
   } catch (e) {
     console.error(`❌ 发送 Telegram 消息失败: ${e.message}`);
     return null;

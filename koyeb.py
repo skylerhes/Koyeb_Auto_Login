@@ -28,12 +28,24 @@ def send_tg_message(message):
         return
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
+    def _post(payload):
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return response
 
     try:
-        response = requests.post(url, data=data, timeout=30)
-        response.raise_for_status()
-        logging.info("✅ Telegram 消息发送成功")
+        try:
+            _post({"chat_id": chat_id, "text": message, "parse_mode": "Markdown"})
+            logging.info("✅ Telegram 消息发送成功")
+        except requests.HTTPError as http_err:
+            response = getattr(http_err, "response", None)
+            if response is not None and response.status_code == 400:
+                detail = response.text.strip()
+                logging.warning(f"⚠️ Telegram 返回 400，改用纯文本重试: {detail[:200]}")
+                _post({"chat_id": chat_id, "text": message})
+                logging.info("✅ Telegram 消息发送成功（纯文本重试）")
+            else:
+                raise
     except requests.RequestException as e:
         logging.error(f"❌ 发送 Telegram 消息失败: {e}")
 
