@@ -97,7 +97,7 @@ def login_koyeb(email, password):
             detail = response.text.strip()[:200]
             logging.info(f"ℹ️ 旧接口 403，尝试 WorkOS 登录: {detail}")
 
-            workos_url = f"{signin_fallback['base']}/signin/password"
+            workos_url = f"{signin_fallback['base']}"
             payload = {
                 "email": data["email"],
                 "password": password,
